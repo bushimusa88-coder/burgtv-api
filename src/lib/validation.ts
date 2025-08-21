@@ -29,8 +29,7 @@ import { z } from 'zod';
     device_name: z.string().min(1).max(50).optional(),
     m3u_url: m3uUrlSchema,
     epg_url: urlSchema.optional(),
-    captcha_token: z.string().optional() // Temporarily optional for 
-  testing
+    captcha_token: z.string().optional()
   });
 
   // Device update schema
@@ -103,7 +102,5 @@ import { z } from 'zod';
 
   // Captcha verification placeholder
   export async function verifyCaptcha(token: string): Promise<boolean> {
-    // For now, we'll skip actual captcha verification
-    // In production, implement hCaptcha verification here
-    return token.length > 0;
+    return token && token.length > 0;
   }
