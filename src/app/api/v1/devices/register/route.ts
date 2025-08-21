@@ -1,198 +1,94 @@
-import { NextRequest, NextResponse } from 'next/server';
-  import { supabaseAdmin } from '@/lib/supabase';
-  import { deviceRegistrationSchema, validateM3uUrl, verifyCaptcha } from
-  '@/lib/validation';
-  import { corsMiddleware, rateLimitMiddleware, withErrorHandling,
-  logRequest } from '@/lib/middleware';
-  import { ApiResponse, Device, DeviceRegistrationResponse } from
-  '@/types/api';
+import { z } from 'zod';
 
-  async function registerDeviceHandler(req: NextRequest): 
-  Promise<NextResponse> {
-    logRequest(req);
+  export const macAddressSchema = z.string()
+    .regex(/^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/, 'Invalid MAC 
+  address')
+    .transform(mac => mac.toUpperCase().replace(/-/g, ':'));
 
-    // Handle CORS preflight
-    if (req.method === 'OPTIONS') {
-      return new NextResponse(null, {
-        status: 200,
-        headers: corsMiddleware(req)
-      });
-    }
+  export const deviceTypeSchema = z.enum(['firetv', 'samsung', 'lg',
+  'appletv', 'android', 'ios']);
 
-    // Rate limiting
-    const rateLimitResponse = await rateLimitMiddleware(req);
-    if (rateLimitResponse) {
-      return rateLimitResponse;
-    }
+  export const urlSchema = z.string()
+    .url('Invalid URL')
+    .refine(url => url.startsWith('http://') || url.startsWith('https://'),
+   'URL must use HTTP or HTTPS');
 
-    // Parse request body
-    let body;
+  export const m3uUrlSchema = urlSchema
+    .refine(url => url.includes('.m3u') || url.includes('get.php') ||
+  url.includes('playlist'), 'Invalid M3U URL');
+
+  export const deviceRegistrationSchema = z.object({
+    device_type: deviceTypeSchema,
+    mac_address: macAddressSchema,
+    device_name: z.string().min(1).max(50).optional(),
+    m3u_url: m3uUrlSchema,
+    epg_url: urlSchema.optional(),
+    captcha_token: z.string().optional()
+  });
+
+  export const deviceUpdateSchema = z.object({
+    device_name: z.string().min(1).max(50).optional(),
+    m3u_url: m3uUrlSchema.optional(),
+    epg_url: urlSchema.optional()
+  }).refine(data => Object.keys(data).length > 0, 'At least one field 
+  required');
+
+  export function formatMacAddress(mac: string): string {
+    return mac.toUpperCase().replace(/[^A-F0-9]/g, '').replace(/(.{2})/g,
+  '$1:').slice(0, -1);
+  }
+
+  export function isValidMacAddress(mac: string): boolean {
+    const result = macAddressSchema.safeParse(mac);
+    return result.success;
+  }
+
+  export async function validateM3uUrl(url: string): Promise<{
+    isValid: boolean;
+    channelCount?: number;
+    error?: string;
+  }> {
     try {
-      body = await req.json();
-    } catch {
-      return NextResponse.json({
-        success: false,
-        error: 'Invalid JSON body'
-      } as ApiResponse, {
-        status: 400,
-        headers: corsMiddleware(req)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch(url, {
+        method: 'HEAD',
+        signal: controller.signal
       });
-    }
+      clearTimeout(timeoutId);
 
-    // Validate input
-    const validation = deviceRegistrationSchema.safeParse(body);
-    if (!validation.success) {
-      return NextResponse.json({
-        success: false,
-        error: 'Validation failed',
-        message: validation.error.errors.map(e => e.message).join(', ')
-      } as ApiResponse, {
-        status: 400,
-        headers: corsMiddleware(req)
-      });
-    }
-
-    const { device_type, mac_address, device_name, m3u_url, epg_url,
-  captcha_token } = validation.data;
-
-    // Verify captcha - TEMPORARILY DISABLED FOR TESTING
-    // const captchaValid = await verifyCaptcha(captcha_token);
-    // if (!captchaValid) {
-    //   return NextResponse.json({
-    //     success: false,
-    //     error: 'Captcha verification failed'
-    //   } as ApiResponse, { 
-    //     status: 400,
-    //     headers: corsMiddleware(req)
-    //   });
-    // }
-
-    // Validate M3U URL
-    const m3uValidation = await validateM3uUrl(m3u_url);
-    if (!m3uValidation.isValid) {
-      return NextResponse.json({
-        success: false,
-        error: 'Invalid M3U URL',
-        message: m3uValidation.error
-      } as ApiResponse, {
-        status: 400,
-        headers: corsMiddleware(req)
-      });
-    }
-
-    try {
-      // Check if MAC address already exists
-      const { data: existingDevice } = await supabaseAdmin
-        .from('devices')
-        .select('id, mac_address')
-        .eq('mac_address', mac_address)
-        .single();
-
-      if (existingDevice) {
-        return NextResponse.json({
-          success: false,
-          error: 'MAC address already registered',
-          message: 'This MAC address is already associated with another device'
-        } as ApiResponse, {
-          status: 409,
-          headers: corsMiddleware(req)
-        });
+      if (!response.ok) {
+        return {
+          isValid: false,
+          error: `HTTP error ${response.status}`
+        };
       }
 
-      // Create new device
-      const deviceData = {
-        mac_address,
-        device_type,
-        device_name: device_name || `${device_type.charAt(0).toUpperCase() 
-  + device_type.slice(1)} Device`,
-        m3u_url,
-        epg_url: epg_url || null,
-        status: 'active',
-        captcha_verified: true,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
+      const contentType = response.headers.get('content-type');
 
-      const { data: newDevice, error: insertError } = await supabaseAdmin
-        .from('devices')
-        .insert([deviceData])
-        .select()
-        .single();
-
-      if (insertError) {
-        console.error('Device registration error:', insertError);
-        return NextResponse.json({
-          success: false,
-          error: 'Registration failed',
-          message: 'Unable to register device. Please try again.'
-        } as ApiResponse, {
-          status: 500,
-          headers: corsMiddleware(req)
-        });
+      if (contentType && (
+        contentType.includes('application/x-mpegurl') ||
+        contentType.includes('audio/x-mpegurl') ||
+        contentType.includes('text/plain') ||
+        url.toLowerCase().includes('.m3u')
+      )) {
+        return { isValid: true };
       }
 
-      // Log the registration
-      await supabaseAdmin
-        .from('device_logs')
-        .insert([{
-          device_id: newDevice.id,
-          action: 'device_registered',
-          details: {
-            device_type,
-            ip_address: req.headers.get('x-forwarded-for') ||
-  req.headers.get('x-real-ip'),
-            user_agent: req.headers.get('user-agent')
-          },
-          ip_address: req.headers.get('x-forwarded-for') ||
-  req.headers.get('x-real-ip'),
-          user_agent: req.headers.get('user-agent'),
-          created_at: new Date().toISOString()
-        }]);
-
-      // Generate access token (simplified for now)
-      const accessToken = Buffer.from(`${newDevice.id}:${newDevice.mac_addr
-  ess}:${Date.now()}`).toString('base64');
-      const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 *
-  1000).toISOString(); // 1 year
-
-      const response: DeviceRegistrationResponse = {
-        device: {
-          id: newDevice.id,
-          mac_address: newDevice.mac_address,
-          device_type: newDevice.device_type as any,
-          device_name: newDevice.device_name,
-          m3u_url: newDevice.m3u_url,
-          epg_url: newDevice.epg_url,
-          created_at: newDevice.created_at,
-          updated_at: newDevice.updated_at,
-          status: newDevice.status as any,
-          last_active: newDevice.last_active
-        },
-        access_token: accessToken,
-        expires_at: expiresAt
+      return {
+        isValid: false,
+        error: 'Not a valid M3U playlist'
       };
-
-      return NextResponse.json({
-        success: true,
-        data: response,
-        message: 'Device registered successfully'
-      } as ApiResponse<DeviceRegistrationResponse>, {
-        status: 201,
-        headers: corsMiddleware(req)
-      });
 
     } catch (error) {
-      console.error('Unexpected registration error:', error);
-      return NextResponse.json({
-        success: false,
-        error: 'Internal server error',
-        message: 'An unexpected error occurred during registration'
-      } as ApiResponse, {
-        status: 500,
-        headers: corsMiddleware(req)
-      });
+      return {
+        isValid: false,
+        error: 'Network error'
+      };
     }
   }
 
-  export const POST = withErrorHandling(registerDeviceHandler);
-  export const OPTIONS = registerDeviceHandler;
+  export async function verifyCaptcha(token: string): Promise<boolean> {
+    return token && token.length > 0;
+  }
