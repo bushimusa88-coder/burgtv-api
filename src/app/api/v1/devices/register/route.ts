@@ -92,8 +92,7 @@ import { NextRequest, NextResponse } from 'next/server';
         return NextResponse.json({
           success: false,
           error: 'MAC address already registered',
-          message: 'This MAC address is already associated with another 
-  device'
+          message: 'This MAC address is already associated with another device'
         } as ApiResponse, {
           status: 409,
           headers: corsMiddleware(req)
