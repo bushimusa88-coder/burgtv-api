@@ -1,7 +1,6 @@
- import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
   import { supabaseAdmin } from '@/lib/supabase';
-  import { deviceRegistrationSchema, validateM3uUrl } from
-  '@/lib/validation';
+  import { deviceRegistrationSchema } from '@/lib/validation';
   import { corsMiddleware, rateLimitMiddleware, withErrorHandling,
   logRequest } from '@/lib/middleware';
   import { ApiResponse, DeviceRegistrationResponse } from '@/types/api';
@@ -37,10 +36,12 @@
 
     const validation = deviceRegistrationSchema.safeParse(body);
     if (!validation.success) {
+      const errorMsg = validation.error.errors.map(e => e.message).join(', 
+  ');
       return NextResponse.json({
         success: false,
         error: 'Validation failed',
-        message: validation.error.errors.map(e => e.message).join(', ')
+        message: errorMsg
       } as ApiResponse, {
         status: 400,
         headers: corsMiddleware(req)
@@ -50,11 +51,7 @@
     const { device_type, mac_address, device_name, m3u_url, epg_url } =
   validation.data;
 
-    // Skip captcha for now
-    // Skip M3U validation for now
-
     try {
-      // Check if MAC address already exists
       const { data: existingDevice } = await supabaseAdmin
         .from('devices')
         .select('id, mac_address')
@@ -71,7 +68,6 @@
         });
       }
 
-      // Create new device
       const deviceData = {
         mac_address,
         device_type,
@@ -101,7 +97,6 @@
         });
       }
 
-      // Log the registration
       await supabaseAdmin
         .from('device_logs')
         .insert([{
@@ -113,8 +108,9 @@
           created_at: new Date().toISOString()
         }]);
 
-      const accessToken = Buffer.from(`${newDevice.id}:${newDevice.mac_addr
-  ess}:${Date.now()}`).toString('base64');
+      const tokenData =
+  `${newDevice.id}:${newDevice.mac_address}:${Date.now()}`;
+      const accessToken = Buffer.from(tokenData).toString('base64');
       const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 *
   1000).toISOString();
 
