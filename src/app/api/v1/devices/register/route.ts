@@ -1,9 +1,11 @@
-import { NextRequest, NextResponse } from 'next/server';
+  import { NextRequest, NextResponse } from 'next/server';
   import { supabaseAdmin } from '@/lib/supabase';
-  import { deviceRegistrationSchema } from '@/lib/validation';
+  import { deviceRegistrationSchema, validateM3uUrl, verifyCaptcha } from
+  '@/lib/validation';
   import { corsMiddleware, rateLimitMiddleware, withErrorHandling,
   logRequest } from '@/lib/middleware';
-  import { ApiResponse, DeviceRegistrationResponse } from '@/types/api';
+  import { ApiResponse, Device, DeviceRegistrationResponse } from
+  '@/types/api';
 
   async function registerDeviceHandler(req: NextRequest): 
   Promise<NextResponse> {
@@ -25,10 +27,11 @@ import { NextRequest, NextResponse } from 'next/server';
     try {
       body = await req.json();
     } catch {
-      return NextResponse.json({
+      const errorResponse = {
         success: false,
         error: 'Invalid JSON body'
-      } as ApiResponse, {
+      };
+      return NextResponse.json(errorResponse as ApiResponse, {
         status: 400,
         headers: corsMiddleware(req)
       });
@@ -36,20 +39,36 @@ import { NextRequest, NextResponse } from 'next/server';
 
     const validation = deviceRegistrationSchema.safeParse(body);
     if (!validation.success) {
-      const errorMsg = validation.error.errors.map(e => e.message).join(', 
-  ');
-      return NextResponse.json({
+      const errors = validation.error.errors;
+      const errorMessages = errors.map(e => e.message);
+      const joinedErrors = errorMessages.join('; ');
+
+      const errorResponse = {
         success: false,
         error: 'Validation failed',
-        message: errorMsg
-      } as ApiResponse, {
+        message: joinedErrors
+      };
+      return NextResponse.json(errorResponse as ApiResponse, {
         status: 400,
         headers: corsMiddleware(req)
       });
     }
 
-    const { device_type, mac_address, device_name, m3u_url, epg_url } =
-  validation.data;
+    const { device_type, mac_address, device_name, m3u_url, epg_url,
+  captcha_token } = validation.data;
+
+    const m3uValidation = await validateM3uUrl(m3u_url);
+    if (!m3uValidation.isValid) {
+      const errorResponse = {
+        success: false,
+        error: 'Invalid M3U URL',
+        message: m3uValidation.error
+      };
+      return NextResponse.json(errorResponse as ApiResponse, {
+        status: 400,
+        headers: corsMiddleware(req)
+      });
+    }
 
     try {
       const { data: existingDevice } = await supabaseAdmin
@@ -59,25 +78,32 @@ import { NextRequest, NextResponse } from 'next/server';
         .single();
 
       if (existingDevice) {
-        return NextResponse.json({
+        const errorResponse = {
           success: false,
-          error: 'MAC address already registered'
-        } as ApiResponse, {
+          error: 'MAC address already registered',
+          message: 'This MAC address is already associated with another 
+  device'
+        };
+        return NextResponse.json(errorResponse as ApiResponse, {
           status: 409,
           headers: corsMiddleware(req)
         });
       }
 
+      const currentTime = new Date().toISOString();
+      const defaultName = device_type.charAt(0).toUpperCase() +
+  device_type.slice(1) + ' Device';
+
       const deviceData = {
         mac_address,
         device_type,
-        device_name: device_name || `${device_type} Device`,
+        device_name: device_name || defaultName,
         m3u_url,
         epg_url: epg_url || null,
         status: 'active',
         captcha_verified: true,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
+        created_at: currentTime,
+        updated_at: currentTime
       };
 
       const { data: newDevice, error: insertError } = await supabaseAdmin
@@ -88,31 +114,42 @@ import { NextRequest, NextResponse } from 'next/server';
 
       if (insertError) {
         console.error('Device registration error:', insertError);
-        return NextResponse.json({
+        const errorResponse = {
           success: false,
-          error: 'Registration failed'
-        } as ApiResponse, {
+          error: 'Registration failed',
+          message: 'Unable to register device. Please try again.'
+        };
+        return NextResponse.json(errorResponse as ApiResponse, {
           status: 500,
           headers: corsMiddleware(req)
         });
       }
+
+      const ipAddress = req.headers.get('x-forwarded-for') ||
+  req.headers.get('x-real-ip');
+      const userAgent = req.headers.get('user-agent');
+      const logTime = new Date().toISOString();
 
       await supabaseAdmin
         .from('device_logs')
         .insert([{
           device_id: newDevice.id,
           action: 'device_registered',
-          details: { device_type },
-          ip_address: req.headers.get('x-forwarded-for'),
-          user_agent: req.headers.get('user-agent'),
-          created_at: new Date().toISOString()
+          details: {
+            device_type,
+            ip_address: ipAddress,
+            user_agent: userAgent
+          },
+          ip_address: ipAddress,
+          user_agent: userAgent,
+          created_at: logTime
         }]);
 
-      const tokenData =
-  `${newDevice.id}:${newDevice.mac_address}:${Date.now()}`;
+      const tokenData = newDevice.id + ':' + newDevice.mac_address + ':' +
+  Date.now();
       const accessToken = Buffer.from(tokenData).toString('base64');
-      const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 *
-  1000).toISOString();
+      const oneYear = 365 * 24 * 60 * 60 * 1000;
+      const expiresAt = new Date(Date.now() + oneYear).toISOString();
 
       const response: DeviceRegistrationResponse = {
         device: {
@@ -131,21 +168,26 @@ import { NextRequest, NextResponse } from 'next/server';
         expires_at: expiresAt
       };
 
-      return NextResponse.json({
+      const successResponse = {
         success: true,
         data: response,
         message: 'Device registered successfully'
-      } as ApiResponse<DeviceRegistrationResponse>, {
+      };
+
+      return NextResponse.json(successResponse as
+  ApiResponse<DeviceRegistrationResponse>, {
         status: 201,
         headers: corsMiddleware(req)
       });
 
     } catch (error) {
-      console.error('Registration error:', error);
-      return NextResponse.json({
+      console.error('Unexpected registration error:', error);
+      const errorResponse = {
         success: false,
-        error: 'Internal server error'
-      } as ApiResponse, {
+        error: 'Internal server error',
+        message: 'An unexpected error occurred during registration'
+      };
+      return NextResponse.json(errorResponse as ApiResponse, {
         status: 500,
         headers: corsMiddleware(req)
       });
