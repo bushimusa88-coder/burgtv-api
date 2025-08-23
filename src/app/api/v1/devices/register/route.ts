@@ -86,13 +86,88 @@ async function registerDeviceHandler(req: NextRequest): Promise<NextResponse> {
       .single();
 
     if (existingDevice) {
-      const errorResponse = {
-        success: false,
-        error: 'MAC already exists',
-        message: 'MAC already used'
+      // Update existing device instead of rejecting
+      const currentTime = new Date().toISOString();
+      const defaultName = device_type.charAt(0).toUpperCase() + device_type.slice(1) + ' Device';
+      
+      const updateData = {
+        device_type,
+        device_name: device_name || defaultName,
+        m3u_url,
+        epg_url: epg_url || null,
+        status: 'active',
+        updated_at: currentTime
       };
-      return NextResponse.json(errorResponse as ApiResponse, { 
-        status: 409,
+
+      const { data: updatedDevice, error: updateError } = await supabaseAdmin
+        .from('devices')
+        .update(updateData)
+        .eq('mac_address', mac_address)
+        .select()
+        .single();
+
+      if (updateError) {
+        console.error('Device update error:', updateError);
+        const errorResponse = {
+          success: false,
+          error: 'Update failed',
+          message: 'Try again later'
+        };
+        return NextResponse.json(errorResponse as ApiResponse, { 
+          status: 500,
+          headers: corsMiddleware(req)
+        });
+      }
+
+      // Log the update
+      const ipAddress = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip');
+      const userAgent = req.headers.get('user-agent');
+      
+      await supabaseAdmin
+        .from('device_logs')
+        .insert([{
+          device_id: updatedDevice.id,
+          action: 'device_updated',
+          details: {
+            device_type,
+            ip_address: ipAddress,
+            user_agent: userAgent
+          },
+          ip_address: ipAddress,
+          user_agent: userAgent,
+          created_at: currentTime
+        }]);
+
+      const tokenData = updatedDevice.id + ':' + updatedDevice.mac_address + ':' + Date.now();
+      const accessToken = Buffer.from(tokenData).toString('base64');
+      const oneYear = 365 * 24 * 60 * 60 * 1000;
+      const expiresAt = new Date(Date.now() + oneYear).toISOString();
+
+      const response: DeviceRegistrationResponse = {
+        device: {
+          id: updatedDevice.id,
+          mac_address: updatedDevice.mac_address,
+          device_type: updatedDevice.device_type as any,
+          device_name: updatedDevice.device_name,
+          m3u_url: updatedDevice.m3u_url,
+          epg_url: updatedDevice.epg_url,
+          created_at: updatedDevice.created_at,
+          updated_at: updatedDevice.updated_at,
+          status: updatedDevice.status as any,
+          last_active: updatedDevice.last_active
+        },
+        access_token: accessToken,
+        expires_at: expiresAt
+      };
+
+      const successResponse = {
+        success: true,
+        data: response,
+        message: 'Device updated successfully'
+      };
+      
+      return NextResponse.json(successResponse as ApiResponse<DeviceRegistrationResponse>, {
+        status: 200,
         headers: corsMiddleware(req)
       });
     }
