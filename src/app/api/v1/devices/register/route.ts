@@ -64,18 +64,20 @@ async function registerDeviceHandler(req: NextRequest): Promise<NextResponse> {
   //   });
   // }
 
-  const m3uValidation = await validateM3uUrl(m3u_url);
-  if (!m3uValidation.isValid) {
-    const errorResponse = {
-      success: false,
-      error: 'Invalid URL',
-      message: 'Bad URL'
-    };
-    return NextResponse.json(errorResponse as ApiResponse, { 
-      status: 400,
-      headers: corsMiddleware(req)
-    });
-  }
+  // VALIDAZIONE M3U URL RIMOSSA - Accetta tutti i tipi di URL IPTV
+  // Inclusi formati standard (.m3u, .m3u8) e URL con parametri (get.php?username=xxx&password=xxx)
+  // const m3uValidation = await validateM3uUrl(m3u_url);
+  // if (!m3uValidation.isValid) {
+  //   const errorResponse = {
+  //     success: false,
+  //     error: 'Invalid URL',
+  //     message: 'Bad URL'
+  //   };
+  //   return NextResponse.json(errorResponse as ApiResponse, { 
+  //     status: 400,
+  //     headers: corsMiddleware(req)
+  //   });
+  // }
 
   try {
     // Check if MAC address already exists
